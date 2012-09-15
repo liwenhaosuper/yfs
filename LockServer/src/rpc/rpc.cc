@@ -621,9 +621,9 @@ rpcs::checkduplicate_and_update(unsigned int clt_nonce, unsigned int xid,
 		unsigned int xid_rep, char **b, int *sz)
 {
 	ScopedLock rwl(&reply_window_m_);
-
         // You fill this in for Lab 1.
 	//TODO: That is it
+	printf("check dup:%u,%u,%u\n",clt_nonce,xid,xid_rep);
 	return NEW;
 }
 

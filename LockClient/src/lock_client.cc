@@ -8,6 +8,9 @@
 #include <iostream>
 #include <stdio.h>
 
+
+lock_client::sequence lock_client::mSeq = 1000;
+
 lock_client::lock_client(std::string dst)
 {
   sockaddr_in dstsock;

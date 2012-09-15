@@ -25,6 +25,5 @@ class lock_client {
 
 };
 
-lock_client::sequence lock_client::mSeq = 0;
 
 #endif 

@@ -14,7 +14,7 @@ lock_server::lock_server():
 }
 
 lock_protocol::status
-lock_server::stat(int clt, lock_protocol::lockid_t lid, int &r)
+lock_server::stat(int clt, lock_protocol::lockid_t lid, lock_server::sequence seq,int &r)
 {
   lock_protocol::status ret = lock_protocol::OK;
   if(mLocks.count(lid)==1){
@@ -27,8 +27,9 @@ lock_server::stat(int clt, lock_protocol::lockid_t lid, int &r)
 }
 
 lock_protocol::status
-lock_server::acquire(int clt, lock_protocol::lockid_t lid, int &r)
+lock_server::acquire(int clt, lock_protocol::lockid_t lid,lock_server::sequence seq, int &r)
 {
+	//printf("acquire request from clt %d,%lld,%lld\n", clt,lid,seq);
 	pthread_mutex_lock(&qlock);
 	if(mLocks.count(lid)==0){
 		mLocks[lid] = lock_server::locked;
@@ -52,8 +53,9 @@ lock_server::acquire(int clt, lock_protocol::lockid_t lid, int &r)
 	return lock_protocol::OK;
 }
 lock_protocol::status
-lock_server::release(int clt, lock_protocol::lockid_t lid, int &r)
+lock_server::release(int clt, lock_protocol::lockid_t lid,lock_server::sequence seq, int &r)
 {
+	//printf("release request from clt %d,%lld,%lld\n", clt,lid,seq);
 	if(mLocks.count(lid)==0||mLocks[lid]!=lock_server::locked){
 		r = nacquire;
 		return lock_protocol::OK;
@@ -65,3 +67,4 @@ lock_server::release(int clt, lock_protocol::lockid_t lid, int &r)
 	r = nacquire;
 	return lock_protocol::OK;
 }
+

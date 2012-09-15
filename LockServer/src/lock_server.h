@@ -16,6 +16,7 @@ class lock_server {
 	  enum lock_status{
 		  free,locked
 	  };
+	  typedef unsigned long long sequence;
  protected:
   int nacquire;
   map<lock_protocol::lockid_t,lock_status> mLocks;
@@ -24,9 +25,9 @@ class lock_server {
  public:
   lock_server();
   ~lock_server() {};
-  lock_protocol::status stat(int clt, lock_protocol::lockid_t lid, int &);
-  lock_protocol::status acquire(int clt,lock_protocol::lockid_t lid,int &);
-  lock_protocol::status release(int clt,lock_protocol::lockid_t lid,int &);
+  lock_protocol::status stat(int clt, lock_protocol::lockid_t lid, lock_server::sequence seq, int &);
+  lock_protocol::status acquire(int clt,lock_protocol::lockid_t lid,lock_server::sequence seq,int &);
+  lock_protocol::status release(int clt,lock_protocol::lockid_t lid,lock_server::sequence seq,int &);
 };
 
 #endif 
