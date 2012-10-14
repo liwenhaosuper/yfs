@@ -1,0 +1,652 @@
+/*
+ * receive request from fuse and call methods of yfs_client
+ *
+ * started life as low-level example in the fuse distribution.  we
+ * have to use low-level interface in order to get i-numbers.  the
+ * high-level interface only gives us complete paths.
+ */
+
+#include <fuse_lowlevel.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <strings.h>
+#include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include "lang/verify.h"
+#include "yfs_client.h"
+#include <ctime>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <vector>
+
+int myid;
+yfs_client *yfs;
+
+int id() { 
+  return myid;
+}
+
+bool newbaby = true;
+//generate a new inum using random method
+yfs_client::inum generate_inum(bool isfile=true){
+    if(newbaby){ //init only once
+        srand(time(NULL));
+        newbaby = false;
+    }
+    yfs_client::inum result = rand();
+    if(isfile){
+        result |= 0x80000000;
+    }else{
+        result |= 0x7FFFFFFF;
+    }
+    return result;
+}
+
+yfs_client::status
+getattr(yfs_client::inum inum, struct stat &st)
+{
+  yfs_client::status ret;
+
+  bzero(&st, sizeof(st));
+
+  st.st_ino = inum;
+  printf("getattr %016llx %d\n", inum, yfs->isfile(inum));
+  if(yfs->isfile(inum)){
+     yfs_client::fileinfo info;
+     ret = yfs->getfile(inum, info);
+     if(ret != yfs_client::OK)
+       return ret;
+     st.st_mode = S_IFREG | 0666;
+     st.st_nlink = 1;
+     st.st_atime = info.atime;
+     st.st_mtime = info.mtime;
+     st.st_ctime = info.ctime;
+     st.st_size = info.size;
+     printf("   getattr -> %llu\n", info.size);
+   } else {
+     yfs_client::dirinfo info;
+     ret = yfs->getdir(inum, info);
+     if(ret != yfs_client::OK)
+       return ret;
+     st.st_mode = S_IFDIR | 0777;
+     st.st_nlink = 2;
+     st.st_atime = info.atime;
+     st.st_mtime = info.mtime;
+     st.st_ctime = info.ctime;
+     printf("   getattr -> %lu %lu %lu\n", info.atime, info.mtime, info.ctime);
+   }
+   return yfs_client::OK;
+}
+
+
+void
+fuseserver_getattr(fuse_req_t req, fuse_ino_t ino,
+          struct fuse_file_info *fi)
+{
+    struct stat st;
+    yfs_client::inum inum = ino; // req->in.h.nodeid;
+    yfs_client::status ret;
+    printf("getattr()\n");
+    ret = getattr(inum, st);
+    if(ret != yfs_client::OK){
+      fuse_reply_err(req, ENOENT);
+      return;
+    }
+    fuse_reply_attr(req, &st, 0);
+}
+
+void
+fuseserver_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr, int to_set, struct fuse_file_info *fi)
+{
+  printf("fuseserver_setattr 0x%x\n", to_set);
+  if (FUSE_SET_ATTR_SIZE & to_set) {
+    printf("   fuseserver_setattr set size to %u\n", attr->st_size);
+    struct stat st;
+    // You fill this in for Lab 2
+    printf("setattr()\n");
+    if(yfs->isfile(ino)){//file
+        std::string data;
+        yfs->getfiledata(ino,-1,-1,data);
+        size_t sz = attr->st_size;
+        if(sz<data.size()){
+            data = data.substr(0,sz);
+        }else{
+            data.append(sz-data.size(),'\0');
+        }
+        yfs->put(ino,data);
+        struct stat st;
+        getattr(ino, st);
+        fuse_reply_attr(req, &st, 0);
+    }else{
+        fuse_reply_err(req, ENOSYS);
+    }
+
+  } else {
+    fuse_reply_err(req, ENOSYS);
+  }
+}
+
+void
+fuseserver_read(fuse_req_t req, fuse_ino_t ino, size_t size,
+      off_t off, struct fuse_file_info *fi)
+{
+  // You fill this in for Lab 2
+
+    //@param ino file id
+    //@param size data size to be read
+    //@param off offset when starting to read
+    printf("read()\n");
+    if(yfs->isfile(ino)){//file
+        std::string data;
+        if(yfs->getfiledata(ino,size,off,data)==yfs_client::OK){
+            printf("read(%016llx,%d,%d) data read sze:%d\n",ino,size,off,data.size());
+            fuse_reply_buf(req, data.c_str(),data.size());
+            return;
+        }
+    }
+    fuse_reply_err(req, ENOSYS);
+}
+
+void
+fuseserver_write(fuse_req_t req, fuse_ino_t ino,
+  const char *buf, size_t size, off_t off,
+  struct fuse_file_info *fi)
+{
+  // You fill this in for Lab 2
+
+    //@param ino file id
+    //@param size data size to be write in buf
+    //@param off offset when starting to write
+    printf("write()\n");
+//    if(strlen(buf)<size){  //boundry error
+//        size = strlen(buf);
+//    }
+    printf("write() sz %d from %d\n",size,off);
+    if(yfs->isfile(ino)){ //a file
+        std::string data;
+        if(yfs->getfiledata(ino,-1,-1,data)!=yfs_client::OK){ //all data
+            fuse_reply_err(req, ENOSYS);
+            return;
+        }
+        printf("original size is %d\n",data.size());
+        std::string writedata = std::string(buf,size);
+        if(data.size()<=off+size){
+            if(data.size()<=off){
+                data.append(off-data.size(),'\0');
+            }else{
+                data = data.substr(0,off);
+            }
+            data +=writedata;
+        }else{
+            std::string latter = data.substr(size+off);
+            data = data.substr(0,off);
+            data +=writedata;
+            data +=latter;
+        }
+        yfs->put(ino,data);
+        printf("write(): data written size: %d\n",data.size());
+        fuse_reply_write(req,size);
+    }else{
+        fuse_reply_err(req, ENOSYS);
+    }
+}
+
+yfs_client::status
+fuseserver_createhelper(fuse_ino_t parent, const char *name,
+     mode_t mode, struct fuse_entry_param *e)
+{
+  // In yfs, timeouts are always set to 0.0, and generations are always set to 0
+  e->attr_timeout = 0.0;
+  e->entry_timeout = 0.0;
+  e->generation = 0;
+
+  //TODO: Lab2
+  //parent should be a directory
+  if(yfs->isdir(parent)){
+      yfs_client::dirent dir;
+      dir.inum = parent;
+      int res = yfs->getdirdata(dir);
+      if(res!=yfs_client::OK){ //error occurs
+          printf("createhelper():can't get dirdata, %llx\n",dir.inum);
+          return res;
+      }
+      std::string data = dir.name;
+      //TODO: check the existence of the file
+
+
+
+
+      yfs_client::inum id = generate_inum(!S_ISDIR(mode));
+      data.append("//");// in unix, "//" could not be a file name
+      data.append(yfs->filename(id));
+      data.append("/");
+      data.append(name);//   format:   //id/name//id/name
+      // ------------begin transaction --------------
+      printf("update directory \n");
+      yfs->put(parent,data); //update the directory
+      data = "";
+      printf("add file \n");
+      yfs->put(id,data);   //add file/dir
+      // ------------end transaction ----------------
+      e->ino = id;
+      getattr(e->ino, e->attr);
+//      if(!S_ISDIR(mode)){ // file
+//          printf("file mode\n");
+//          yfs_client::fileinfo finfo;
+//          res = yfs->getfile(id,finfo);
+//          if(res!=yfs_client::OK){
+//              printf("createHelper: get file fail...\n");
+//              return res;
+//          }
+//          e->attr.st_size = finfo.size;
+//          e->attr.st_atime = finfo.atime;
+//          e->attr.st_ctime = finfo.ctime;
+//          e->attr.st_ino = id;
+//          e->attr.st_mtime = finfo.mtime;
+//      }else{ //dir
+//          printf("dir mode\n");
+//          yfs_client::dirinfo dinfo;
+//          res = yfs->getdir(id,dinfo);
+//          if(res!=yfs_client::OK){
+//              printf("createHelper: get dir fail...\n");
+//              return res;
+//          }
+//          e->attr.st_atime = dinfo.atime;
+//          e->attr.st_ctime = dinfo.ctime;
+//          e->attr.st_mtime = dinfo.mtime;
+//      }
+      printf("createhelper():OK\n");
+      return yfs_client::OK;
+  }
+  //parent is not a directory
+  printf("parent is not a directory!!\n");
+  return yfs_client::IOERR;
+}
+
+void
+fuseserver_create(fuse_req_t req, fuse_ino_t parent, const char *name,
+   mode_t mode, struct fuse_file_info *fi)
+{
+  struct fuse_entry_param e;
+  yfs_client::status ret;
+  printf("create()\n");
+  if( (ret = fuseserver_createhelper( parent, name, mode, &e )) == yfs_client::OK ) {
+    fi->fh = fi->flags;
+    int res = fuse_reply_create(req, &e, fi);
+    printf("create() OK %d\n",res);
+  } else {
+		if (ret == yfs_client::EXIST) {
+			fuse_reply_err(req, EEXIST);
+		}else{
+			fuse_reply_err(req, ENOENT);
+		}
+  }
+}
+
+void fuseserver_mknod( fuse_req_t req, fuse_ino_t parent, 
+    const char *name, mode_t mode, dev_t rdev ) {
+  struct fuse_entry_param e;
+  yfs_client::status ret;
+  printf("mknod()\n");
+  if( (ret = fuseserver_createhelper( parent, name, mode, &e )) == yfs_client::OK ) {
+    fuse_reply_entry(req, &e);
+    printf("mknod() OK\n");
+  } else {
+		if (ret == yfs_client::EXIST) {
+			fuse_reply_err(req, EEXIST);
+		}else{
+			fuse_reply_err(req, ENOENT);
+		}
+  }
+}
+
+void
+fuseserver_lookup(fuse_req_t req, fuse_ino_t parent, const char *name)
+{
+  struct fuse_entry_param e;
+  // In yfs, timeouts are always set to 0.0, and generations are always set to 0
+  e.attr_timeout = 0.0;
+  e.entry_timeout = 0.0;
+  e.generation = 0;
+
+  // You fill this in for Lab 2
+  // Look up the file named `name' in the directory referred to by
+  // `parent' in YFS. If the file was found, initialize e.ino and
+  // e.attr appropriately.
+  printf("lookup(): %s\n",name);
+  yfs_client::dirent dir;
+  dir.inum = parent;
+  if(yfs->getdirdata(dir)==yfs_client::OK){
+      printf("lookup(): parent %llx,name %s\n",parent,name);
+      std::string dirdata = dir.name;
+      std::cout<<dirdata<<"end"<<" sz:"<<dirdata.size()<<std::endl;
+      if(dirdata.size()<=0){
+          fuse_reply_err(req, ENOENT);
+          return;
+      }
+      std::string cname = std::string(name);
+//      std::string::size_type sztp = dirdata.find("/"+cname+"//"); //
+//      if(sztp==std::string::npos){//not found,is it in the last item?
+//          sztp = dirdata.find_last_of("/"+cname);
+//          if(sztp==std::string::npos||sztp+1!=dirdata.size()){
+//              int dd = sztp+cname.size()+1;
+//              int tt = sztp;
+//              printf("%d,%d,%d\n",tt,dd,dirdata.size());
+//              printf("lookup(): could not find %s,dir data:%s\n",name,dirdata.c_str());
+//              fuse_reply_err(req, ENOENT);
+//              return;
+//          }
+//      }
+//      //get id
+//      std::string::size_type sty = dirdata.find_last_of("//",sztp);
+//      if(sty==std::string::npos){//not found
+//          printf("lookup():could not get id\n");
+//          fuse_reply_err(req, ENOENT);
+//          return;
+//      }
+//      std::string sid = dirdata.substr(sty+1,sztp-sty);
+      //FIX: use strtok() to simplify this messy code!
+      char* pch;
+      char* str = new char[dirdata.size()+1];
+      memset(str,0,sizeof(str));
+      //memcpy(str,dirdata.c_str(),dirdata.size());
+      strcpy(str,dirdata.c_str());
+      printf("str sz %d\n",strlen(str));
+      pch = strtok(str,"//");
+      std::vector<std::string> mVec;
+      while(pch!=NULL){
+          mVec.push_back(std::string(pch,strlen(pch)));
+          printf("data %s,sz %d\n",std::string(pch,strlen(pch)).c_str(),strlen(pch));
+          pch = strtok(NULL,"//");
+          //printf("%s\n",pch);
+      }
+      printf("lookup(): mVec sz: %d\n",mVec.size());
+      for(int i=1;i<mVec.size();i+=2){
+          if(mVec.at(i).compare(name)==0){
+              std::string sid = mVec.at(i-1);
+              printf("lookup sid is %s \n",sid.c_str());
+              e.ino = yfs->n2i(sid);
+              getattr(e.ino,e.attr);
+              fuse_reply_entry(req, &e);
+              return;
+          }
+      }
+      printf("lookup():could not get id for name %s\n",name);
+      for(int i=0;i<mVec.size();i++){
+          printf("-->%s",mVec.at(i).c_str());
+      }
+      printf("\n");
+      fuse_reply_err(req, ENOENT);
+      return;
+
+  }
+  printf("lookup():could not get dirdata\n");
+  fuse_reply_err(req, ENOENT);
+}
+
+
+struct dirbuf {
+    char *p;
+    size_t size;
+};
+
+void dirbuf_add(struct dirbuf *b, const char *name, fuse_ino_t ino)
+{
+    struct stat stbuf;
+    size_t oldsize = b->size;
+    b->size += fuse_dirent_size(strlen(name));
+    b->p = (char *) realloc(b->p, b->size);
+    memset(&stbuf, 0, sizeof(stbuf));
+    stbuf.st_ino = ino;
+    fuse_add_dirent(b->p + oldsize, name, &stbuf, b->size);
+}
+
+#define min(x, y) ((x) < (y) ? (x) : (y))
+
+int reply_buf_limited(fuse_req_t req, const char *buf, size_t bufsize,
+          off_t off, size_t maxsize)
+{
+  if (off < bufsize)
+    return fuse_reply_buf(req, buf + off, min(bufsize - off, maxsize));
+  else
+    return fuse_reply_buf(req, NULL, 0);
+}
+
+void
+fuseserver_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
+          off_t off, struct fuse_file_info *fi)
+{
+
+  yfs_client::inum inum = ino; // req->in.h.nodeid;
+  struct dirbuf b;
+
+  printf("fuseserver_readdir\n");
+
+  if(!yfs->isdir(inum)){
+    fuse_reply_err(req, ENOTDIR);
+    return;
+  }
+
+  memset(&b, 0, sizeof(b));
+
+
+  // You fill this in for Lab 2
+  // Ask the yfs_client for the file names / i-numbers
+  // in directory inum, and call dirbuf_add() for each.
+
+  yfs_client::dirent dir;
+  dir.inum = ino;
+  printf("readdir()\n");
+  if(yfs->getdirdata(dir)==yfs_client::OK){
+      std::string data = dir.name;
+      if(data.size()<=0){
+          printf("readdir(): no value return: %s\n",dir.name.c_str());
+          reply_buf_limited(req, b.p, b.size, off, size);
+          return;
+      }
+      //int indx = 0,sindx = 0;
+      printf("readdir(): dirdata:%s\n",data.c_str());
+      //FIXME: This is really messy!
+//      while(true){
+//          if(indx>data.size()){
+//              break;
+//          }
+//          indx = data.find_first_of("//",indx);
+//          if(indx+2>data.size()|indx<0){
+//              break;
+//          }
+//          sindx = data.find_first_of("/",indx+2);
+//          if(sindx<0||sindx+1>data.size()){
+//              break;
+//          }
+//          std::string sid = data.substr(indx+2,sindx-indx-2),sname;
+//          indx = data.find_first_of("//",sindx+1);
+//          if(indx>=0){
+//              sname = data.substr(sindx+1,indx-sindx-1);
+//          }else{
+//              break;
+//          }
+//          dirbuf_add(&b,sname.c_str(),yfs->n2i(sid));
+//          printf("readdir %s,%016llx\n",sname.c_str(),yfs->n2i(sid));
+//      }
+      //use strtok() to simplify this code!
+      char *pch;
+      char *str = new char[data.size()+1];
+      memset(str,0,sizeof(str));
+      //memcpy(str,data.c_str(),data.size());
+      strcpy(str,data.c_str());
+      pch = strtok(str,"//");
+      std::vector<std::string> mVec;
+      while(pch!=NULL){
+          mVec.push_back(std::string(pch,strlen(pch)));
+          pch = strtok(NULL,"//");
+      }
+      printf("readdir():mVec sz:%d\n",mVec.size());
+      for(int i=1;i<mVec.size();i+=2){
+          std::string sname = mVec.at(i);
+          std::string sid = mVec.at(i-1);
+          dirbuf_add(&b,sname.c_str(),yfs->n2i(sid));
+          printf("readdir %s,%016llx\n",sname.c_str(),yfs->n2i(sid));
+      }
+      reply_buf_limited(req, b.p, b.size, off, size);
+      free(b.p);
+  }else{
+      fuse_reply_err(req, ENOSYS);
+      printf("readdir():fail\n");
+  }
+
+}
+
+
+void
+fuseserver_open(fuse_req_t req, fuse_ino_t ino,
+     struct fuse_file_info *fi)
+{
+    fi->fh = fi->flags;
+    printf("open() %016llx\n",ino);
+    fuse_reply_open(req, fi);
+}
+
+void
+fuseserver_mkdir(fuse_req_t req, fuse_ino_t parent, const char *name,
+     mode_t mode)
+{
+  struct fuse_entry_param e;
+  // In yfs, timeouts are always set to 0.0, and generations are always set to 0
+  e.attr_timeout = 0.0;
+  e.entry_timeout = 0.0;
+  e.generation = 0;
+
+  // You fill this in for Lab 3
+  printf("mkdir()\n");
+#if 0
+  fuse_reply_entry(req, &e);
+#else
+  fuse_reply_err(req, ENOSYS);
+#endif
+}
+
+void
+fuseserver_unlink(fuse_req_t req, fuse_ino_t parent, const char *name)
+{
+
+  // You fill this in for Lab 3
+  // Success:	fuse_reply_err(req, 0);
+  // Not found:	fuse_reply_err(req, ENOENT);
+    printf("unlink\n");
+  fuse_reply_err(req, ENOSYS);
+}
+
+void
+fuseserver_statfs(fuse_req_t req)
+{
+  struct statvfs buf;
+
+  printf("statfs()\n");
+
+  memset(&buf, 0, sizeof(buf));
+
+  buf.f_namemax = 255;
+  buf.f_bsize = 512;
+
+  fuse_reply_statfs(req, &buf);
+}
+
+struct fuse_lowlevel_ops fuseserver_oper;
+
+int
+main(int argc, char *argv[])
+{
+  char *mountpoint = 0;
+  int err = -1;
+  int fd;
+
+  setvbuf(stdout, NULL, _IONBF, 0);
+
+  if(argc != 4){
+    fprintf(stderr, "Usage: yfs_client <mountpoint> <port-extent-server> <port-lock-server>\n");
+    exit(1);
+  }
+  mountpoint = argv[1];
+
+  srandom(getpid());
+
+  myid = random();
+
+  yfs = new yfs_client(argv[2], argv[3]);
+
+  fuseserver_oper.getattr    = fuseserver_getattr;
+  fuseserver_oper.statfs     = fuseserver_statfs;
+  fuseserver_oper.readdir    = fuseserver_readdir;
+  fuseserver_oper.lookup     = fuseserver_lookup;
+  fuseserver_oper.create     = fuseserver_create;
+  fuseserver_oper.mknod      = fuseserver_mknod;
+  fuseserver_oper.open       = fuseserver_open;
+  fuseserver_oper.read       = fuseserver_read;
+  fuseserver_oper.write      = fuseserver_write;
+  fuseserver_oper.setattr    = fuseserver_setattr;
+  fuseserver_oper.unlink     = fuseserver_unlink;
+  fuseserver_oper.mkdir      = fuseserver_mkdir;
+
+  const char *fuse_argv[20];
+  int fuse_argc = 0;
+  fuse_argv[fuse_argc++] = argv[0];
+#ifdef __APPLE__
+  fuse_argv[fuse_argc++] = "-o";
+  fuse_argv[fuse_argc++] = "nolocalcaches"; // no dir entry caching
+  fuse_argv[fuse_argc++] = "-o";
+  fuse_argv[fuse_argc++] = "daemon_timeout=86400";
+#endif
+
+  // everyone can play, why not?
+  //fuse_argv[fuse_argc++] = "-o";
+  //fuse_argv[fuse_argc++] = "allow_other";
+
+  fuse_argv[fuse_argc++] = mountpoint;
+  fuse_argv[fuse_argc++] = "-d";
+
+  fuse_args args = FUSE_ARGS_INIT( fuse_argc, (char **) fuse_argv );
+  int foreground;
+  int res = fuse_parse_cmdline( &args, &mountpoint, 0 /*multithreaded*/, 
+        &foreground );
+  if( res == -1 ) {
+      fprintf(stderr, "fuse_parse_cmdline failed %s\n",args.argv[1]);
+    return 0;
+  }
+  
+  args.allocated = 0;
+
+  fd = fuse_mount(mountpoint, &args);
+  if(fd == -1){
+    fprintf(stderr, "fuse_mount failed\n");
+    exit(1);
+  }
+
+  struct fuse_session *se;
+
+  se = fuse_lowlevel_new(&args, &fuseserver_oper, sizeof(fuseserver_oper),
+       NULL);
+  if(se == 0){
+    fprintf(stderr, "fuse_lowlevel_new failed\n");
+    exit(1);
+  }
+
+  struct fuse_chan *ch = fuse_kern_chan_new(fd);
+  if (ch == NULL) {
+    fprintf(stderr, "fuse_kern_chan_new failed\n");
+    exit(1);
+  }
+
+  fuse_session_add_chan(se, ch);
+  // err = fuse_session_loop_mt(se);   // FK: wheelfs does this; why?
+  err = fuse_session_loop(se);
+    
+  fuse_session_destroy(se);
+  close(fd);
+  fuse_unmount(mountpoint);
+
+  return err ? 1 : 0;
+}

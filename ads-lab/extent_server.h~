@@ -1,0 +1,60 @@
+// this is the extent server
+
+#ifndef extent_server_h
+#define extent_server_h
+
+#include <string>
+#include <map>
+#include "extent_protocol.h"
+
+struct dirNode;
+
+struct fileNode{
+    unsigned int atime; //last content access time
+    unsigned int mtime; //the last content modification time
+    unsigned int ctime; //the last attribute change time 
+    unsigned int size;  //size of the file
+    extent_protocol::extentid_t id; //File ID
+    std::string name; //name of the file
+    dirNode* dir; // directory of this file locates 
+    fileNode(){
+       
+    }
+};
+
+struct dirNode{
+    extent_protocol::extentid_t id; //directory ID
+    std::string name; //name of the dir
+    unsigned int atime; //last content access time
+    unsigned int mtime; //the last content modification time
+    unsigned int ctime; //the last attribute change time
+    dirNode* entry; //parent dir of this dir
+    map<extent_protocol::extentid_t,fileNode> mFiles;//list of files
+    map<extend_protocol::extendid_t,dirNode> mDirs; //list of dirs
+};
+
+
+class extent_server {
+
+ public:
+  extent_server();
+  int put(extent_protocol::extentid_t id, std::string, int &);
+  int get(extent_protocol::extentid_t id, std::string &);
+  int getattr(extent_protocol::extentid_t id, extent_protocol::attr &);
+  int remove(extent_protocol::extentid_t id, int &);
+ private:
+  fileNode* entry;
+};
+
+
+
+
+
+#endif 
+
+
+
+
+
+
+
